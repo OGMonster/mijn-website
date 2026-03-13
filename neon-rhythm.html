@@ -119,6 +119,18 @@
   }
   .song-card.selected { border-color:var(--yellow); box-shadow:0 0 24px rgba(255,255,0,.2); }
 
+  /* ── CUSTOM UPLOAD CARD ── */
+  .song-card.upload-card { border-style:dashed; border-color:rgba(0,255,255,.25); cursor:pointer; }
+  .song-card.upload-card:hover { border-color:var(--cyan); background:rgba(0,255,255,.08); }
+  .song-card.upload-card.selected { border-style:solid; border-color:var(--yellow); box-shadow:0 0 24px rgba(255,255,0,.2); }
+  .song-card.upload-card.has-file { border-style:solid; border-color:rgba(0,255,255,.4); }
+  .song-card.upload-card.has-file.selected { border-color:var(--yellow); }
+  .upload-icon { font-size:22px; opacity:.5; transition:opacity .2s; }
+  .song-card.upload-card:hover .upload-icon,
+  .song-card.upload-card.has-file .upload-icon { opacity:1; }
+  .upload-hint { font-size:9px; color:rgba(0,255,255,.4); font-family:"Share Tech Mono",monospace; letter-spacing:.1em; margin-top:2px; }
+  #customFileInput { display:none; }
+
   .song-info { display:flex; flex-direction:column; gap:4px; }
   .song-name { font-size:15px; font-weight:700; letter-spacing:.1em; color:white; }
   .song-artist { font-size:11px; color:rgba(255,255,255,.45); font-family:'Share Tech Mono',monospace; letter-spacing:.1em; }
@@ -541,6 +553,7 @@
 
   <div class="song-list" id="songList">
     <!-- filled by JS -->
+    <input type="file" id="customFileInput" accept=".mp3,audio/*">
   </div>
 
   <div class="nav-btns">
@@ -604,6 +617,13 @@
       <div class="mod-info">
         <div class="mod-name">🎚 ACTIVATE SLIDERS <span style="font-size:9px;opacity:.6;">(EXPERIMENTAL)</span></div>
         <div class="mod-desc">Some notes become hold notes — press and hold until the tail ends</div>
+      </div>
+      <div class="mod-toggle"></div>
+    </div>
+    <div class="mod-card" id="mod-godmode" onclick="toggleMod('godmode')">
+      <div class="mod-info">
+        <div class="mod-name">😇 GOD MODE</div>
+        <div class="mod-desc">Health cannot drop — you cannot die. Miss all you want.</div>
       </div>
       <div class="mod-toggle"></div>
     </div>
@@ -706,8 +726,21 @@ const SONGS = [
 let selectedSong = 0;
 let difficulty   = 0;
 
+// Custom upload state
+let customAudioBuffer   = null;   // decoded AudioBuffer of user's file
+let customRawBuffer     = null;   // ArrayBuffer for beat analysis
+let customFileName      = '';
+
+const CUSTOM_SONG_IDX = SONGS.length; // index of the "Your Music" card
+
 // Build song list
 const songList = document.getElementById('songList');
+
+function selectSongCard(idx) {
+  selectedSong = idx;
+  document.querySelectorAll('.song-card').forEach((c, j) => c.classList.toggle('selected', j === idx));
+}
+
 SONGS.forEach((s, i) => {
   const card = document.createElement('div');
   card.className = 'song-card' + (i === 0 ? ' selected' : '');
@@ -717,15 +750,52 @@ SONGS.forEach((s, i) => {
       <div class="song-artist">${s.artist}</div>
     </div>
     <div class="song-num">${String(i+1).padStart(2,'0')}</div>`;
-  card.onclick = () => {
-    selectedSong = i;
-    document.querySelectorAll('.song-card').forEach((c,j) => c.classList.toggle('selected', j===i));
-  };
+  card.onclick = () => selectSongCard(i);
   songList.appendChild(card);
 });
 
+// ── "Your Music" upload card ──────────────────────────────
+const uploadCard = document.createElement('div');
+uploadCard.className = 'song-card upload-card';
+uploadCard.id = 'uploadCard';
+uploadCard.innerHTML = `
+  <div class="song-info">
+    <div class="song-name" id="uploadName" style="color:rgba(0,255,255,.6);">YOUR MUSIC</div>
+    <div class="upload-hint" id="uploadHint">click to select an mp3</div>
+  </div>
+  <div class="upload-icon">&#8679;</div>`;
+uploadCard.onclick = () => document.getElementById('customFileInput').click();
+songList.appendChild(uploadCard);
+
+document.getElementById('customFileInput').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  customFileName = file.name.replace(/\.[^.]+$/, '').toUpperCase();
+  document.getElementById('uploadName').textContent  = customFileName;
+  document.getElementById('uploadName').style.color  = 'white';
+  document.getElementById('uploadHint').textContent  = 'LOADING…';
+  uploadCard.classList.add('has-file');
+
+  try {
+    const ctx = getCtx();
+    if (ctx.state === 'suspended') await ctx.resume();
+    customRawBuffer   = await file.arrayBuffer();
+    customAudioBuffer = await ctx.decodeAudioData(customRawBuffer.slice(0));
+    document.getElementById('uploadHint').textContent = file.name;
+    selectSongCard(CUSTOM_SONG_IDX);
+  } catch(err) {
+    document.getElementById('uploadHint').textContent = 'error — try another file';
+    console.warn('Custom audio error:', err);
+  }
+  e.target.value = ''; // reset so same file can be re-selected
+});
+
 function updateBanner() {
-  document.getElementById('bannerTitle').textContent = SONGS[selectedSong].name;
+  const name = selectedSong === CUSTOM_SONG_IDX
+    ? (customFileName || 'YOUR MUSIC')
+    : SONGS[selectedSong].name;
+  document.getElementById('bannerTitle').textContent = name;
 }
 
 // ============================================================
@@ -862,7 +932,8 @@ const LANE_COLORS  = ['#00ffff','#ff00ff','#ffff00','#00ff88'];
 const DEFAULT_KEYS = ['d','f','j','k'];
 let   LANE_KEYS    = JSON.parse(localStorage.getItem('ogNeonKeys') || 'null') || [...DEFAULT_KEYS];
 const HIT_WINDOW   = 150; // kept for miss detection; actual judgement uses JUDGE_WINDOWS
-const NOTE_SPEED   = 0.5; // slightly faster — more osu!mania feel
+let   NOTE_SPEED   = 0.5; // px/ms — recalculated at game start
+const LEAD_IN_MS   = 1500; // ms lead-in before music starts
 
 // ============================================================
 // KEYBIND SYSTEM
@@ -907,7 +978,7 @@ updateKeybindUI();
 // ============================================================
 // MODS SYSTEM
 // ============================================================
-const mods = { darkness: false, hidden: false, sudden: false, mirror: false, sliders: false };
+const mods = { darkness: false, hidden: false, sudden: false, mirror: false, sliders: false, godmode: false };
 let totalNoteDuration = 90000;
 
 function toggleMod(id) {
@@ -988,64 +1059,171 @@ function goToMenu() {
 applySkin(activeSkin);
 
 // ============================================================
-// BEAT DETECTION
+// BEAT DETECTION  — spectral flux onset detection
 // ============================================================
 async function analyzeBeats(arrayBuffer) {
   const ctx     = getCtx();
   const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
   const sr      = decoded.sampleRate;
-  const data    = decoded.getChannelData(0);
 
-  const winSamp = Math.floor(sr * 0.01);
-  const hop     = Math.floor(winSamp / 2);
+  // ── Offline FFT via OfflineAudioContext ──────────────────
+  const FFT_SIZE  = 2048;
+  const HOP_SIZE  = 512;
+  const numFrames = Math.floor((decoded.length - FFT_SIZE) / HOP_SIZE);
+  const offCtx    = new OfflineAudioContext(1, decoded.length, sr);
+  const src       = offCtx.createBufferSource();
+  src.buffer      = decoded;
+  const analyser  = offCtx.createAnalyser();
+  analyser.fftSize = FFT_SIZE;
+  src.connect(analyser);
+  analyser.connect(offCtx.destination);
+  src.start(0);
 
-  const energies = [];
-  for (let i = 0; i + winSamp < data.length; i += hop) {
-    let e = 0;
-    for (let j = 0; j < winSamp; j++) e += data[i+j] * data[i+j];
-    energies.push({ t:(i/sr)*1000, e:e/winSamp });
+  // Render one hop at a time using a ScriptProcessor polyfill approach
+  // — simpler: render full audio offline then do FFT manually in JS
+  // Use raw PCM + manual short-time energy per band for speed
+  const raw   = decoded.getChannelData(0);
+  const raw2  = decoded.numberOfChannels > 1 ? decoded.getChannelData(1) : null;
+
+  // Mix to mono
+  const mono = new Float32Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    mono[i] = raw2 ? (raw[i] + raw2[i]) * 0.5 : raw[i];
   }
 
-  const W = 20;
-  const smoothed = energies.map((en,i) => {
-    const lo=Math.max(0,i-W), hi=Math.min(energies.length-1,i+W);
-    let s=0; for (let k=lo;k<=hi;k++) s+=energies[k].e;
-    return { t:en.t, e:s/(hi-lo+1) };
-  });
+  // ── Compute spectral flux (half-wave rectified energy diff) ──
+  // We use a simple approximation: split into sub-bands and track energy rise
+  const BANDS      = 8;
+  const BAND_SAMP  = Math.floor(FFT_SIZE / BANDS);
+  const fluxFrames = [];
 
+  // Build Hann window
+  const hann = new Float32Array(FFT_SIZE);
+  for (let i = 0; i < FFT_SIZE; i++) hann[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (FFT_SIZE - 1)));
+
+  // Simple DFT per band — too slow; use energy-per-band shortcut
+  let prevBandE = new Float32Array(BANDS);
+
+  for (let f = 0; f * HOP_SIZE + FFT_SIZE < mono.length; f++) {
+    const off    = f * HOP_SIZE;
+    const bandE  = new Float32Array(BANDS);
+    for (let b = 0; b < BANDS; b++) {
+      const lo = off + b * BAND_SAMP;
+      const hi = lo + BAND_SAMP;
+      let e = 0;
+      for (let s = lo; s < hi; s++) e += mono[s] * mono[s] * hann[s - off] * hann[s - off];
+      bandE[b] = e / BAND_SAMP;
+    }
+
+    // Spectral flux = sum of positive energy differences across bands
+    let flux = 0;
+    for (let b = 0; b < BANDS; b++) {
+      const diff = bandE[b] - prevBandE[b];
+      if (diff > 0) flux += diff;
+    }
+    fluxFrames.push({ t: (off / sr) * 1000, flux });
+    prevBandE = bandE;
+  }
+
+  // ── Adaptive threshold & peak picking ────────────────────
   const cfg = [
-    { mult:1.7,  minGap:320 },
-    { mult:1.4,  minGap:220 },
-    { mult:1.15, minGap:140 }
+    { threshMult: 1.5, minGap: 350, delta: 0.0001 },  // easy
+    { threshMult: 1.3, minGap: 230, delta: 0.00005 },  // medium
+    { threshMult: 1.1, minGap: 150, delta: 0.00002 }   // hard
   ][difficulty];
 
-  const beats = [];
-  let lastT = -9999;
-  const lb = 25;
-  for (let i=lb; i<smoothed.length-lb; i++) {
-    let local=0;
-    for (let k=i-lb;k<=i+lb;k++) local+=energies[k].e;
-    local/=(lb*2+1);
-    if (energies[i].e > local*cfg.mult && smoothed[i].t - lastT > cfg.minGap) {
-      beats.push(smoothed[i].t);
-      lastT = smoothed[i].t;
+  const WIN_HALF = 12; // local window half-size for adaptive threshold
+  const beats    = [];
+  let lastT      = -9999;
+
+  for (let i = WIN_HALF; i < fluxFrames.length - WIN_HALF; i++) {
+    // Local mean
+    let localSum = 0;
+    for (let k = i - WIN_HALF; k <= i + WIN_HALF; k++) localSum += fluxFrames[k].flux;
+    const localMean = localSum / (WIN_HALF * 2 + 1);
+    const thresh    = localMean * cfg.threshMult + cfg.delta;
+
+    const cur = fluxFrames[i].flux;
+    // Must exceed threshold AND be a local peak
+    if (cur > thresh && cur >= fluxFrames[i - 1].flux && cur >= fluxFrames[i + 1].flux) {
+      if (fluxFrames[i].t - lastT > cfg.minGap) {
+        beats.push(fluxFrames[i].t);
+        lastT = fluxFrames[i].t;
+      }
     }
   }
 
-  const pats = [
-    [0,2,1,3,0,3,1,2],
-    [0,1,2,3,1,0,3,2,0,2],
-    [0,1,2,3,2,1,0,3,1,2,0,3]
-  ];
-  const pat = pats[difficulty];
-  const result = beats.map((t,i) => ({ time:t, lane:pat[i%pat.length] }));
+  // ── Smart lane assignment: singles, stairs, jumps ────────
+  // Probability weights per difficulty [single, stair, jump]
+  const weights = [
+    [0.80, 0.15, 0.05],  // easy:   mostly singles, a few stairs, rare jumps
+    [0.55, 0.30, 0.15],  // medium: mix of all three
+    [0.35, 0.35, 0.30],  // hard:   lots of stairs and jumps
+  ][difficulty];
 
-  if (difficulty===2) {
-    const extras=[];
-    result.forEach((n,i) => { if (i%6===0) extras.push({time:n.time,lane:(n.lane+2)%4}); });
-    result.push(...extras);
-    result.sort((a,b)=>a.time-b.time);
+  const result = [];
+  let lastLane = -1;
+  let stairDir =  1;
+  let stairLen =  0;
+  let stairPos =  0;
+
+  function pickType() {
+    const r = Math.random();
+    if (r < weights[0])              return 'single';
+    if (r < weights[0] + weights[1]) return 'stair';
+    return 'jump';
   }
+
+  function randomLane(avoid) {
+    let l;
+    do { l = Math.floor(Math.random() * 4); } while (l === avoid);
+    return l;
+  }
+
+  let bi = 0;
+  while (bi < beats.length) {
+    const t = beats[bi];
+
+    if (stairLen > 0) {
+      stairPos += stairDir;
+      if (stairPos < 0 || stairPos > 3) { stairDir = -stairDir; stairPos += stairDir * 2; }
+      result.push({ time: t, lane: stairPos });
+      lastLane = stairPos;
+      stairLen--;
+      bi++;
+      continue;
+    }
+
+    const type = pickType();
+
+    if (type === 'stair') {
+      stairLen = Math.floor(Math.random() * 3) + 2;
+      stairDir = Math.random() < 0.5 ? 1 : -1;
+      stairPos = lastLane >= 0 ? lastLane : Math.floor(Math.random() * 4);
+      if (stairPos === 0 && stairDir === -1) stairDir =  1;
+      if (stairPos === 3 && stairDir ===  1) stairDir = -1;
+      result.push({ time: t, lane: stairPos });
+      lastLane = stairPos;
+      stairLen--;
+      bi++;
+
+    } else if (type === 'jump') {
+      const laneA = Math.floor(Math.random() * 4);
+      const laneB = randomLane(laneA);
+      result.push({ time: t, lane: laneA });
+      result.push({ time: t, lane: laneB });
+      lastLane = laneB;
+      bi++;
+
+    } else {
+      const lane = randomLane(lastLane);
+      result.push({ time: t, lane });
+      lastLane = lane;
+      bi++;
+    }
+  }
+
+  result.sort((a, b) => a.time - b.time);
   return result;
 }
 
@@ -1065,9 +1243,9 @@ function playMusic(buffer) {
   musicSource = ctx.createBufferSource();
   musicSource.buffer = buffer;
   musicSource.connect(musicGain);
-  const leadIn = 1.5;
-  musicSource.start(ctx.currentTime + leadIn);
-  audioStartCtxTime = ctx.currentTime + leadIn;
+  const leadInSec = LEAD_IN_MS / 1000;
+  musicSource.start(ctx.currentTime + leadInSec);
+  audioStartCtxTime = ctx.currentTime + leadInSec;
 }
 
 // ============================================================
@@ -1117,19 +1295,36 @@ async function startGame() {
   bar.style.width = '15%';
 
   // Update now-playing title
-  document.getElementById('nowPlayingTitle').textContent = SONGS[selectedSong].name;
+  const isCustom = selectedSong === CUSTOM_SONG_IDX;
+  document.getElementById('nowPlayingTitle').textContent = isCustom
+    ? (customFileName || 'YOUR MUSIC')
+    : SONGS[selectedSong].name;
 
   // Fetch & decode
   let rawBuffer=null, musicDecoded=null;
-  try {
-    const resp = await fetch(SONGS[selectedSong].file);
-    if (resp.ok) {
-      rawBuffer = await resp.arrayBuffer();
-      bar.style.width = '45%';
-      musicDecoded = await ctx.decodeAudioData(rawBuffer.slice(0));
-      bar.style.width = '65%';
+  if (isCustom) {
+    // Use the already-loaded custom buffers
+    if (customRawBuffer && customAudioBuffer) {
+      rawBuffer    = customRawBuffer;
+      musicDecoded = customAudioBuffer;
+    } else {
+      // No file selected yet — bounce back to song select
+      overlay.classList.add('hidden');
+      showScreen('songScreen');
+      return;
     }
-  } catch(e){ console.warn('Audio load error:',e); }
+    bar.style.width = '65%';
+  } else {
+    try {
+      const resp = await fetch(SONGS[selectedSong].file);
+      if (resp.ok) {
+        rawBuffer = await resp.arrayBuffer();
+        bar.style.width = '45%';
+        musicDecoded = await ctx.decodeAudioData(rawBuffer.slice(0));
+        bar.style.width = '65%';
+      }
+    } catch(e){ console.warn('Audio load error:',e); }
+  }
 
   // Analyze beats
   let analyzedNotes = [];
@@ -1153,6 +1348,12 @@ async function startGame() {
   bar.style.width = '100%';
   await new Promise(r=>setTimeout(r,200));
   overlay.classList.add('hidden');
+
+  // Compute NOTE_SPEED so a note spawned at time T arrives at the receptor
+  // exactly when elapsed == T. A note at elapsed=0 starts at y = receptorY - 0 = receptorY
+  // and needs to travel (canvas.height - RECEPTOR_Y_OFFSET) px in LEAD_IN_MS ms.
+  const travelPx = canvas.height - RECEPTOR_Y_OFFSET;
+  NOTE_SPEED = travelPx / LEAD_IN_MS;
 
   // Reset state
   score=0; combo=0; bestCombo=0; health=100;
@@ -1208,7 +1409,7 @@ function gameLoop() {
 
   notes.forEach(note => {
     if (!note.hit && !note.missed && elapsed > note.time+HIT_WINDOW) {
-      note.missed=true; combo=0; health=Math.max(0,health-12);
+      note.missed=true; combo=0; if(!mods.godmode) health=Math.max(0,health-12);
       playMissSound(); spawnFeedback(note.lane,'MISS','#ff4444'); updateHUD();
     }
   });
@@ -1227,7 +1428,7 @@ function gameLoop() {
           // Released too early
           n.holding = false;
           n.missed = true;
-          combo = 0; health = Math.max(0, health - 8);
+          combo = 0; if(!mods.godmode) health = Math.max(0, health - 8);
           playMissSound(); spawnFeedback(n.lane, 'BREAK', '#ff8800'); updateHUD();
         }
       } else if (!n.sliderDone) {
@@ -1240,7 +1441,7 @@ function gameLoop() {
     });
   }
 
-  if (health<=0)                                                        { gameOver(false); return; }
+  if (health<=0 && !mods.godmode)                                       { gameOver(false); return; }
   if (notes.length>0 && notes.every(n=>n.hit||n.missed) && elapsed>2000){ gameOver(true);  return; }
 
   draw(elapsed);
@@ -1251,9 +1452,9 @@ function gameLoop() {
 // ============================================================
 // DRAW  — osu!mania style
 // ============================================================
-const NOTE_H     = 22;   // note block height px
-const RECEPTOR_H = 18;   // receptor bar height
-const RECEPTOR_Y_OFFSET = 56; // px from bottom of canvas to top of receptor
+const NOTE_H     = 22;
+const RECEPTOR_H = 18;
+const RECEPTOR_Y_OFFSET = 56;
 
 function draw(elapsed) {
   const canvas = document.getElementById('gameCanvas');
@@ -1495,7 +1696,7 @@ function handleHit(lane) {
 
   score += pts + (label === 'PERFECT' || label === 'GREAT' ? combo * 2 : 0);
   combo++;
-  health = Math.clamp ? Math.clamp(health + hp, 0, 100) : Math.max(0, Math.min(100, health + hp));
+  if(!mods.godmode || hp > 0) health = Math.clamp ? Math.clamp(health + hp, 0, 100) : Math.max(0, Math.min(100, health + hp));
   if (combo > bestCombo) bestCombo = combo;
   laneFlash[lane] = 1;
   playHitSound(lane);
